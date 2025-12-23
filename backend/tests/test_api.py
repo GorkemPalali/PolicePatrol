@@ -24,3 +24,6 @@ def test_list_crimes():
     response = client.get("/api/v1/crimes?limit=10")
     assert response.status_code == 200
     assert isinstance(response.json(), list)
+
+
+

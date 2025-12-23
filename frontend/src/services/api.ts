@@ -43,6 +43,15 @@ export const crimesApi = {
   update: (id: string, data: Partial<CrimeEvent>) =>
     api.patch<CrimeEvent>(`/crimes/${id}`, data),
   delete: (id: string) => api.delete(`/crimes/${id}`),
+  snapToRoad: (lat: number, lng: number) =>
+    api.get<{
+      snapped_lat: number;
+      snapped_lng: number;
+      road_segment_id: number;
+      original_lat: number;
+      original_lng: number;
+      distance_m: number;
+    }>('/crimes/snap-to-road', { params: { lat, lng } }),
 };
 
 // Forecast API
@@ -63,9 +72,36 @@ export const routingApi = {
     risk_threshold?: number;
     max_minutes?: number;
     end_station_id?: string;
+    start_time?: string;
+    end_time?: string;
   }) => api.post<RouteResponse>('/routing/optimize', data),
   optimizeMulti: (data: MultiStationRouteRequest) =>
     api.post<MultiStationRouteResponse>('/routing/optimize-multi', data),
+};
+
+// OSM API
+export const osmApi = {
+  getRoadNetwork: (params?: {
+    min_lat?: number;
+    min_lng?: number;
+    max_lat?: number;
+    max_lng?: number;
+    limit?: number;
+  }) => api.get<{
+    type: 'FeatureCollection';
+    features: Array<{
+      type: 'Feature';
+      properties: {
+        id: number;
+        road_type: string;
+        speed_limit: number | null;
+        one_way: boolean;
+        risk_score: number;
+      };
+      geometry: any;
+    }>;
+    total: number;
+  }>('/osm/road-network', { params }),
 };
 
 export default api;

@@ -30,3 +30,6 @@ class PoliceStationUpdate(BaseModel):
     active: Optional[bool] = None
 
 
+
+
+

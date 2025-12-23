@@ -220,6 +220,58 @@ npm run dev
 
 ## Veri Import
 
+### Polis Karakolları
+
+Sistemde 5 adet Küçükçekmece polis karakolu tanımlıdır:
+
+1. **Halkalı Şehit Ahmet Zehir Polis Merkezi** (Kapasite: 20)
+2. **İkitelli Şehit Zeki Kaya Polis Merkezi** (Kapasite: 15)
+3. **Kanarya Polis Merkezi** (Kapasite: 18)
+4. **Küçükçekmece Polis Merkezi** (Kapasite: 12)
+5. **Sefaköy Polis Merkezi** (Kapasite: 12)
+
+#### Otomatik Yükleme (Docker Compose)
+
+Karakollar, veritabanı ilk kez oluşturulduğunda **otomatik olarak** yüklenir:
+
+```bash
+# Veritabanını sıfırdan oluştur (mevcut verileri siler)
+docker compose down -v
+docker compose up -d
+```
+
+#### Manuel SQL Script ile Yükleme
+
+```bash
+# Docker container içinden çalıştır
+docker compose exec db psql -U police -d policepatrol -f /docker-entrypoint-initdb.d/05-sample-data.sql
+
+# VEYA host makineden çalıştır
+./scripts/load_police_stations.sh
+```
+
+#### API Üzerinden Yükleme
+
+```bash
+# Tek tek ekleme
+curl -X POST http://localhost:8000/api/v1/stations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Halkalı Şehit Ahmet Zehir Polis Merkezi",
+    "lat": 41.03586,
+    "lng": 28.78759,
+    "capacity": 20,
+    "active": true
+  }'
+
+# Tüm karakolları toplu yükleme
+./scripts/load_police_stations_api.sh
+```
+
+**Not:** Karakol koordinatları Küçükçekmece sınırları içinde olmalıdır. Sınır dışı koordinatlar otomatik olarak reddedilir.
+
+### Suç Olayları
+
 JSONL formatındaki suç verilerini import etmek için:
 
 ```bash
@@ -480,14 +532,6 @@ RISK_WEIGHT=0.3
 - Her merkez için farklı renk
 - Overlap bilgisi gösterimi
 - Koordinasyon skoru gösterimi
-
-## Gelecek Geliştirmeler
-
-- [x] OSM verilerinin otomatik import'u
-- [x] Küçükçekmece sınırlarının polygon olarak saklanması
-- [x] Sınır dışı verilerin otomatik filtrelenmesi
-- [x] Real-time risk updates
-- [x] Multi-station route coordination
 
 ## Lisans
 

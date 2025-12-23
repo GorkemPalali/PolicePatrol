@@ -79,14 +79,23 @@ class BoundaryParser:
                 return None
 
             # Combine outer ways into a single polygon
-            # For simplicity, use the first outer way (largest one)
-            # In production, you might want to merge multiple outer ways
-            polygon_rings = [outer_ways[0]]
+            # OSM relations can have multiple outer ways that need to be connected
+            # Strategy: Find connected ways and merge them into rings
+            merged_outer_ring = self._merge_outer_ways(outer_ways)
+            
+            if not merged_outer_ring or len(merged_outer_ring) < 3:
+                logger.warning(f"Failed to merge outer ways, using first way only. Merged ring has {len(merged_outer_ring) if merged_outer_ring else 0} points")
+                # Fallback: use first way if merge fails
+                merged_outer_ring = outer_ways[0] if outer_ways else None
+                if not merged_outer_ring or len(merged_outer_ring) < 3:
+                    return None
+
+            polygon_rings = [merged_outer_ring]
 
             # Add inner ways as holes
             polygon_rings.extend(inner_ways)
 
-            logger.info(f"Parsed boundary with {len(polygon_rings)} rings ({len(outer_ways)} outer, {len(inner_ways)} inner)")
+            logger.info(f"Parsed boundary with {len(polygon_rings)} rings ({len(outer_ways)} outer ways merged, {len(inner_ways)} inner)")
             return polygon_rings
 
         except ET.ParseError as e:
@@ -96,6 +105,118 @@ class BoundaryParser:
             logger.error(f"Unexpected error parsing boundary: {str(e)}")
             return None
 
+    def _merge_outer_ways(self, outer_ways: List[List[Tuple[float, float]]]) -> Optional[List[Tuple[float, float]]]:
+        """
+        Merge multiple outer ways into a single closed polygon ring.
+        
+        Args:
+            outer_ways: List of way coordinate lists, each way is a list of (lat, lon) tuples
+            
+        Returns:
+            Merged ring as list of (lat, lon) tuples, or None if merge fails
+        """
+        if not outer_ways:
+            return None
+        
+        if len(outer_ways) == 1:
+            # Single way - just ensure it's closed
+            way = outer_ways[0]
+            if len(way) < 3:
+                return None
+            # Close the ring if not already closed
+            if way[0] != way[-1]:
+                return way + [way[0]]
+            return way
+        
+        # Multiple ways - need to connect them
+        # Strategy: Build a graph of connected ways and traverse to form a ring
+        # Ways are connected if the end of one matches the start/end of another
+        
+        def points_match(p1: Tuple[float, float], p2: Tuple[float, float], tolerance: float = 0.0001) -> bool:
+            """Check if two points are close enough to be considered the same."""
+            lat_diff = abs(p1[0] - p2[0])
+            lon_diff = abs(p1[1] - p2[1])
+            return lat_diff < tolerance and lon_diff < tolerance
+        
+        # Build list of way segments with their endpoints
+        segments = []
+        for way in outer_ways:
+            if len(way) < 2:
+                continue
+            start = way[0]
+            end = way[-1]
+            segments.append({
+                'coords': way,
+                'start': start,
+                'end': end,
+                'used': False
+            })
+        
+        if not segments:
+            return None
+        
+        # Start with first segment
+        merged = []
+        current = segments[0]
+        current['used'] = True
+        merged.extend(current['coords'])
+        last_point = current['end']
+        
+        # Try to connect remaining segments
+        remaining = segments[1:]
+        max_iterations = len(remaining) * 2  # Prevent infinite loops
+        iterations = 0
+        
+        while remaining and iterations < max_iterations:
+            iterations += 1
+            found_match = False
+            
+            for i, seg in enumerate(remaining):
+                if seg['used']:
+                    continue
+                
+                # Check if segment connects to current end
+                if points_match(last_point, seg['start']):
+                    # Connect forward
+                    merged.extend(seg['coords'][1:])  # Skip first point (already connected)
+                    last_point = seg['end']
+                    seg['used'] = True
+                    remaining.pop(i)
+                    found_match = True
+                    break
+                elif points_match(last_point, seg['end']):
+                    # Connect backward (reverse the segment)
+                    merged.extend(reversed(seg['coords'][:-1]))  # Skip last point, reverse order
+                    last_point = seg['start']
+                    seg['used'] = True
+                    remaining.pop(i)
+                    found_match = True
+                    break
+            
+            if not found_match:
+                # No more connections - check if we can close the ring
+                if points_match(merged[0], last_point):
+                    # Ring is closed
+                    break
+                else:
+                    # Try to find any unused segment that might connect
+                    # This handles disconnected parts
+                    for i, seg in enumerate(remaining):
+                        if not seg['used']:
+                            # Start a new chain (will create a multipolygon, but we'll use first ring)
+                            break
+                    break
+        
+        # Close the ring if not already closed
+        if len(merged) >= 3 and not points_match(merged[0], merged[-1]):
+            merged.append(merged[0])
+        
+        if len(merged) < 3:
+            logger.warning(f"Merged ring has only {len(merged)} points, insufficient for polygon")
+            return None
+        
+        return merged
+
     def coordinates_to_wkt(
         self, coordinates: List[Tuple[float, float]], close_ring: bool = True
     ) -> str:
@@ -103,7 +224,7 @@ class BoundaryParser:
         Convert coordinates to WKT format.
 
         Args:
-            coordinates: List of (lat, lng) tuples
+            coordinates: List of (lon, lat) tuples - standard GeoJSON/PostGIS order
             close_ring: If True, ensure ring is closed (first point = last point)
 
         Returns:
@@ -117,7 +238,7 @@ class BoundaryParser:
             coordinates = coordinates + [coordinates[0]]
 
         # Convert to WKT format: (lng lat, lng lat, ...)
-        # Note: WKT uses (lng lat) order, not (lat lng)
-        coords_str = ", ".join([f"{lng} {lat}" for lat, lng in coordinates])
+        # coordinates already in (lon, lat) order
+        coords_str = ", ".join([f"{lon} {lat}" for lon, lat in coordinates])
         return f"POLYGON(({coords_str}))"
 

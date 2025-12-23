@@ -1,6 +1,8 @@
 services:
   db:
-    image: postgis/postgis:15-3.4
+    build:
+      context: ./database
+      dockerfile: Dockerfile
     container_name: policepatrol-db
     env_file:
       - .env
@@ -16,7 +18,7 @@ services:
       - ./database/routing_setup.sql:/docker-entrypoint-initdb.d/02-routing-setup.sql
       - ./database/kucukcekmece_boundary.sql:/docker-entrypoint-initdb.d/03-kucukcekmece-boundary.sql
       - ./database/triggers/boundary_validation.sql:/docker-entrypoint-initdb.d/04-boundary-validation.sql
-      - ./database/seeds:/docker-entrypoint-initdb.d/seeds
+      - ./database/seeds/sample_data.sql:/docker-entrypoint-initdb.d/05-sample-data.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-police} -d ${POSTGRES_DB:-policepatrol}"]
       interval: 10s

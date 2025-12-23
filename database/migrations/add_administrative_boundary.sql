@@ -52,3 +52,6 @@ WHERE is_within_kucukcekmece(geom);
 COMMENT ON FUNCTION is_within_kucukcekmece IS 'Küçükçekmece polygon sınırları içinde olup olmadığını kontrol eder (administrative_boundary tablosundan okur)';
 COMMENT ON VIEW crime_event_kucukcekmece IS 'Küçükçekmece polygon sınırları içindeki suç olayları';
 
+
+
+

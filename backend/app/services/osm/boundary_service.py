@@ -45,7 +45,7 @@ class BoundaryService:
     def fetch_boundary_by_name(
         self,
         name: str,
-        admin_level: int = 8,
+        admin_level: int = 6,
         bbox: Optional[Tuple[float, float, float, float]] = None,
     ) -> str:
         """
@@ -53,7 +53,7 @@ class BoundaryService:
 
         Args:
             name: Name of the administrative boundary (e.g., "Küçükçekmece")
-            admin_level: Administrative level (8 for districts in Turkey)
+            admin_level: Administrative level (6 for districts/ilçe in Turkey, 8 for neighborhoods/mahalle)
             bbox: Optional bounding box to limit search (min_lat, min_lng, max_lat, max_lng)
 
         Returns:
@@ -64,16 +64,27 @@ class BoundaryService:
             ValueError: If parameters are invalid
         """
         # Build Overpass QL query
+        # Use bbox to limit search area, then filter by name (case-insensitive regex)
+        # Escape special regex characters in name
+        escaped_name = name.replace('\\', '\\\\').replace('^', '\\^').replace('$', '\\$').replace('.', '\\.').replace('|', '\\|').replace('(', '\\(').replace(')', '\\)').replace('[', '\\[').replace(']', '\\]').replace('{', '\\{').replace('}', '\\}').replace('+', '\\+').replace('*', '\\*').replace('?', '\\?')
+        
         if bbox:
             min_lat, min_lng, max_lat, max_lng = bbox
-            bbox_filter = f"[bbox:{min_lat},{min_lng},{max_lat},{max_lng}]"
-        else:
-            bbox_filter = ""
-
-        query = f"""
+            # Use bbox in the query to limit search area
+            query = f"""
 [out:xml][timeout:300];
 (
-  relation["boundary"="administrative"]["admin_level"="{admin_level}"]["name"="{name}"]{bbox_filter};
+  relation["boundary"="administrative"]["admin_level"="{admin_level}"]({min_lat},{min_lng},{max_lat},{max_lng})["name"~"^{escaped_name}$",i];
+);
+(._;>;);
+out geom;
+"""
+        else:
+            # Without bbox, search globally (slower but works)
+            query = f"""
+[out:xml][timeout:300];
+(
+  relation["boundary"="administrative"]["admin_level"="{admin_level}"]["name"~"^{escaped_name}$",i];
 );
 (._;>;);
 out geom;
@@ -136,4 +147,7 @@ out geom;
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch boundary: {str(e)}")
             raise
+
+
+
 

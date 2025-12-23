@@ -13,9 +13,11 @@ from app.services.forecast.risk_cells import generate_risk_cells
 from app.services.forecast.features import temporal_features
 from app.services.ml.sarimax_service import forecast_timeseries
 from app.core.config import get_settings
+import logging
 
-router = APIRouter(prefix="/forecast", tags=["forecast"])
+router = APIRouter(prefix="/forecast", tags=["Forecast"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/risk-map", response_model=RiskMapResponse)
@@ -23,6 +25,7 @@ def get_risk_map(
     db: Session = Depends(get_db),
     start_time: datetime = Query(..., description="Start of time window"),
     end_time: datetime = Query(..., description="End of time window"),
+    station_id: Optional[str] = Query(None, description="Police station ID - filters by station's neighborhoods"),
     min_lat: Optional[float] = Query(None, description="Bounding box min latitude"),
     min_lng: Optional[float] = Query(None, description="Bounding box min longitude"),
     max_lat: Optional[float] = Query(None, description="Bounding box max latitude"),
@@ -62,6 +65,24 @@ def get_risk_map(
     else:
         bbox = kucukcekmece_bbox
     
+    # First, update road segment risks using KDE (road-segment-based forecast)
+    # Filter by station's neighborhoods if station_id provided
+    from app.services.forecast.road_segment_risk import update_road_segment_risks
+    try:
+        # Update road segment risks for the forecast time window
+        # If station_id provided, only update risks for segments within station's neighborhoods
+        risk_update_result = update_road_segment_risks(
+            db=db,
+            time_window_start=start_time,
+            time_window_end=end_time,
+            station_id=station_id
+        )
+        logger.info(f"Road segment risks updated: {risk_update_result}")
+    except Exception as update_err:
+        logger.warning(f"Failed to update road segment risks: {str(update_err)}")
+        # Continue with grid-based fallback
+    
+    # Generate grid-based risk cells as fallback/backward compatibility
     try:
         risk_cells = generate_forecast_risk_cells(
             db=db,

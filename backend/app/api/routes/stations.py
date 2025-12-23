@@ -8,7 +8,7 @@ from app.models.police_station import PoliceStation
 from app.schemas.station import PoliceStationCreate, PoliceStationRead, PoliceStationUpdate
 from app.services.utils import lat_lng_to_geography, get_point_coordinates, geography_to_geojson, validate_within_boundary
 
-router = APIRouter(prefix="/stations", tags=["stations"])
+router = APIRouter(prefix="/stations", tags=["Stations"])
 
 
 @router.get("", response_model=List[PoliceStationRead])

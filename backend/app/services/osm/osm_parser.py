@@ -13,7 +13,7 @@ class RoadSegmentData:
     """Road segment data structure."""
 
     osm_id: int
-    geom_coordinates: List[Tuple[float, float]]  # List of (lat, lng) tuples
+    geom_coordinates: List[Tuple[float, float]]  # List of (lon, lat) tuples - standard GeoJSON/PostGIS order
     road_type: Optional[str] = None
     speed_limit: Optional[int] = None
     one_way: bool = False
@@ -23,6 +23,7 @@ class OSMParser:
     """Parser for OSM XML data."""
 
     # Highway type to road_type mapping
+    # Only driveable roads - exclude pedestrian, footway, cycleway, path, etc.
     HIGHWAY_TYPE_MAPPING = {
         "motorway": "motorway",
         "trunk": "trunk",
@@ -33,9 +34,7 @@ class OSMParser:
         "service": "service",
         "unclassified": "unclassified",
         "living_street": "residential",
-        "pedestrian": "service",
-        "footway": "service",
-        "path": "service",
+        # Exclude: pedestrian, footway, cycleway, path, steps, track (non-driveable)
     }
 
     # Common speed limit mappings (km/h)
@@ -50,18 +49,17 @@ class OSMParser:
         "unclassified": 50,
     }
 
-    def __init__(self, bbox: Optional[Tuple[float, float, float, float]] = None):
+    def __init__(self):
         """
         Initialize OSM parser.
-
-        Args:
-            bbox: Optional bounding box for filtering (min_lat, min_lng, max_lat, max_lng)
+        No bbox filtering - Overpass API already filters the data.
         """
-        self.bbox = bbox
+        pass
 
     def parse_xml(self, xml_data: str) -> List[RoadSegmentData]:
         """
         Parse OSM XML data and extract road segments.
+        Supports both standard OSM format (with separate nodes) and 'out geom' format (with coordinates in nd elements).
 
         Args:
             xml_data: OSM XML data as string
@@ -73,22 +71,27 @@ class OSMParser:
             root = ET.fromstring(xml_data)
             logger.info(f"Parsing OSM XML with {len(root)} elements")
 
-            # Extract nodes first (for way coordinates)
+            # Extract nodes first (for way coordinates) - standard OSM format
             nodes: Dict[int, Tuple[float, float]] = {}
             for node in root.findall("node"):
                 node_id = int(node.get("id"))
                 lat = float(node.get("lat"))
                 lon = float(node.get("lon"))
                 nodes[node_id] = (lat, lon)
+            
+            logger.info(f"Found {len(nodes)} nodes in XML")
 
             # Extract ways (road segments)
             road_segments: List[RoadSegmentData] = []
+            ways_count = 0
             for way in root.findall("way"):
+                ways_count += 1
                 way_id = int(way.get("id"))
                 road_segment = self._parse_way(way, way_id, nodes)
                 if road_segment:
                     road_segments.append(road_segment)
-
+            
+            logger.info(f"Processed {ways_count} ways, found {len(road_segments)} valid road segments")
             logger.info(f"Parsed {len(road_segments)} road segments from OSM data")
             return road_segments
 
@@ -108,10 +111,11 @@ class OSMParser:
         Args:
             way: OSM way element
             way_id: Way ID
-            nodes: Dictionary of node_id -> (lat, lon)
+            nodes: Dictionary of node_id -> (lat, lon) - OSM format
 
         Returns:
             RoadSegmentData or None if invalid
+            Note: RoadSegmentData.geom_coordinates uses (lon, lat) order - standard GeoJSON/PostGIS format
         """
         # Extract tags
         tags = {}
@@ -126,32 +130,64 @@ class OSMParser:
         if not highway_type:
             return None
 
-        # Map highway type
-        road_type = self.HIGHWAY_TYPE_MAPPING.get(highway_type, highway_type)
+        # Filter out non-driveable roads (exclude service, as it can be driveable)
+        non_driveable = [
+            "footway", "path", "cycleway", "steps", "pedestrian", 
+            "track", "bridleway", "bus_guideway", "escape", 
+            "raceway"
+        ]
+        if highway_type in non_driveable:
+            # Check if it has motor_vehicle access
+            access = tags.get("motor_vehicle", tags.get("access", "yes"))
+            if access in ["no", "private", "permit"]:
+                return None
+        
+        # Special handling for 'service' roads: only include if explicitly driveable
+        if highway_type == "service":
+            access = tags.get("motor_vehicle", tags.get("access", "yes"))
+            if access in ["no", "private", "permit", "delivery", "agricultural", "forestry"]:
+                return None
+
+        # Map highway type (only driveable roads)
+        road_type = self.HIGHWAY_TYPE_MAPPING.get(highway_type)
+        if not road_type:
+            # Unknown highway type, skip it
+            return None
 
         # Extract coordinates from nd (node) references
+        # Support both standard format (nd has ref attribute) and 'out geom' format (nd has lat/lon attributes)
+        # Store as (lon, lat) - standard GeoJSON/PostGIS order
         coordinates: List[Tuple[float, float]] = []
+        missing_nodes = []
         for nd in way.findall("nd"):
-            node_id = int(nd.get("ref"))
-            if node_id in nodes:
-                coordinates.append(nodes[node_id])
+            # Check if nd has lat/lon attributes (out geom format)
+            if nd.get("lat") is not None and nd.get("lon") is not None:
+                lat = float(nd.get("lat"))
+                lon = float(nd.get("lon"))
+                # Store as (lon, lat) - standard GeoJSON/PostGIS order
+                coordinates.append((lon, lat))
+            else:
+                # Standard format: use node reference
+                # nodes dict stores (lat, lon), convert to (lon, lat)
+                node_id = int(nd.get("ref"))
+                if node_id in nodes:
+                    lat, lon = nodes[node_id]
+                    coordinates.append((lon, lat))
+                else:
+                    missing_nodes.append(node_id)
+        
+        # Log warning if many nodes are missing (might indicate incomplete data)
+        if missing_nodes and len(missing_nodes) > len(coordinates):
+            logger.debug(f"Way {way_id} has {len(missing_nodes)} missing nodes out of {len(missing_nodes) + len(coordinates)} total")
 
         # Validate coordinates
         if len(coordinates) < 2:
             logger.debug(f"Way {way_id} has less than 2 coordinates, skipping")
             return None
 
-        # Filter by bbox if provided (bbox is used for initial filtering)
-        # Final filtering will be done by polygon in the importer
-        if self.bbox:
-            min_lat, min_lng, max_lat, max_lng = self.bbox
-            # Check if any coordinate is within bbox
-            in_bbox = any(
-                min_lat <= lat <= max_lat and min_lng <= lng <= max_lng
-                for lat, lng in coordinates
-            )
-            if not in_bbox:
-                return None
+        # No bbox filtering in parser - Overpass API already filtered by relation/polygon/bbox
+        # Parser just processes the data that Overpass API returned
+        # bbox parameter kept for backward compatibility but not used for filtering
 
         # Extract speed limit
         speed_limit = self._extract_speed_limit(tags, road_type)

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, TIMESTAMP, Float
+from sqlalchemy import Column, String, Integer, TIMESTAMP, Float, BigInteger, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from geoalchemy2 import Geography
 from sqlalchemy.sql import func
@@ -18,3 +18,6 @@ class CrimeEvent(Base):
     street_name = Column(String(255))
     confidence_score = Column(Float, nullable=False, default=1.0)
     created_at = Column(TIMESTAMP(timezone=False), server_default=func.now(), nullable=False)
+    snapped_road_segment_id = Column(BigInteger, nullable=True, index=True)
+
+

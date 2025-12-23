@@ -6,8 +6,13 @@ import os
 import logging
 import time
 
-# Add backend to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+# Add backend to path - Docker container uses /app as working directory
+backend_path = os.path.join(os.path.dirname(__file__), "..", "backend")
+if os.path.exists(backend_path):
+    sys.path.insert(0, backend_path)
+# Also try /app (Docker container path)
+if os.path.exists("/app"):
+    sys.path.insert(0, "/app")
 
 from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
