@@ -9,11 +9,29 @@ from app.db.session import get_db
 from app.models.crime_event import CrimeEvent
 from app.services.ml.sarimax_service import forecast_timeseries
 from app.services.ml.spatial_service import forecast_spatial_temporal
+from app.services.ml.spatial_features import create_spatial_features, temporal_feature_vector
 from app.services.forecast.ensemble import ensemble_forecast
 from app.services.forecast.features import temporal_features
 import numpy as np
 
 router = APIRouter(prefix="/ml-forecast", tags=["ML Forecast"])
+
+def _load_spatial_model_metadata(model_path: Path):
+    if not model_path.exists():
+        return None, None
+    try:
+        import pickle
+        with open(model_path, 'rb') as f:
+            model_dict = pickle.load(f)
+        grid_size = model_dict.get('grid_size')
+        bounds = model_dict.get('spatial_bounds')
+        if bounds and len(bounds) == 4:
+            bounds = tuple(float(x) for x in bounds)
+        else:
+            bounds = None
+        return grid_size, bounds
+    except Exception:
+        return None, None
 
 
 @router.get("/timeseries")
@@ -70,7 +88,11 @@ def get_spatial_temporal_forecast(
     from sqlalchemy import text
     events = db.execute(
         text("""
-            SELECT severity, event_time
+            SELECT
+                severity,
+                event_time,
+                ST_Y(geom::geometry) AS lat,
+                ST_X(geom::geometry) AS lng
             FROM crime_event
             WHERE ST_DWithin(
                 geom,
@@ -86,16 +108,23 @@ def get_spatial_temporal_forecast(
     if not events:
         return {"forecast": 0.0, "confidence": 0.0}
     
-    # Create spatial features (simplified)
-    spatial_features = np.array([[lat, lng]] * len(events))
+    coordinates = np.array([[row.lat, row.lng] for row in events])
+    event_counts = np.array([float(row.severity) / 5.0 for row in events])
     
-    # Create temporal features
-    temporal_feat = temporal_features(forecast_time)
-    temporal_features_array = np.array([[temporal_feat["hour_sin"], temporal_feat["hour_cos"],
-                                        temporal_feat["day_sin"], temporal_feat["day_cos"]]])
+    model_path = Path("ml/models/spatial_model.pkl")
+    grid_size, bounds = _load_spatial_model_metadata(model_path)
+    spatial_features = create_spatial_features(
+        coordinates,
+        event_counts,
+        grid_size=int(grid_size) if grid_size else 10,
+        bounds=bounds
+    )
+    
+    temporal_features_array = temporal_feature_vector(forecast_time)
+    if len(spatial_features) > 1:
+        temporal_features_array = np.repeat(temporal_features_array, len(spatial_features), axis=0)
     
     # Forecast
-    model_path = Path("ml/models/spatial_model.pkl")
     forecast = forecast_spatial_temporal(
         spatial_features,
         temporal_features_array,
@@ -103,7 +132,7 @@ def get_spatial_temporal_forecast(
     )
     
     return {
-        "forecast": float(forecast[0]) if len(forecast) > 0 else 0.0,
+        "forecast": float(np.mean(forecast)) if len(forecast) > 0 else 0.0,
         "confidence": min(1.0, len(events) / 10.0),
         "nearby_events": len(events)
     }
@@ -144,10 +173,45 @@ def get_ensemble_forecast(
     
     # Spatial features
     if lat and lng:
-        spatial_features = np.array([[lat, lng]])
-        temporal_feat = temporal_features(start_time)
-        temporal_features_array = np.array([[temporal_feat["hour_sin"], temporal_feat["hour_cos"],
-                                            temporal_feat["day_sin"], temporal_feat["day_cos"]]])
+        from sqlalchemy import text
+        nearby_events = db.execute(
+            text("""
+                SELECT
+                    severity,
+                    ST_Y(geom::geometry) AS lat,
+                    ST_X(geom::geometry) AS lng
+                FROM crime_event
+                WHERE ST_DWithin(
+                    geom,
+                    ST_GeogFromText('POINT(:lng :lat)'),
+                    1000
+                )
+                AND event_time <= :start_time
+                ORDER BY event_time DESC
+                LIMIT 200
+            """),
+            {"lat": lat, "lng": lng, "start_time": start_time}
+        ).fetchall()
+        
+        if nearby_events:
+            coordinates = np.array([[row.lat, row.lng] for row in nearby_events])
+            event_counts = np.array([float(row.severity) / 5.0 for row in nearby_events])
+        else:
+            coordinates = np.array([[lat, lng]])
+            event_counts = np.array([0.0])
+        
+        model_path = Path("ml/models/spatial_model.pkl")
+        grid_size, bounds = _load_spatial_model_metadata(model_path)
+        spatial_features = create_spatial_features(
+            coordinates,
+            event_counts,
+            grid_size=int(grid_size) if grid_size else 10,
+            bounds=bounds
+        )
+        
+        temporal_features_array = temporal_feature_vector(start_time)
+        if len(spatial_features) > 1:
+            temporal_features_array = np.repeat(temporal_features_array, len(spatial_features), axis=0)
     else:
         spatial_features = np.array([[0.0, 0.0]])
         temporal_features_array = np.array([[0.0, 0.0, 0.0, 0.0]])
@@ -168,5 +232,4 @@ def get_ensemble_forecast(
         },
         "models_used": ["kde", "sarimax", "spatial"]
     }
-
 

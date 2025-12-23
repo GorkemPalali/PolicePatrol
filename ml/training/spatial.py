@@ -85,7 +85,6 @@ def train_simple_spatial_model(
 ) -> dict:
     """
     Train a simple spatial-temporal model.
-    This is a placeholder - full implementation would use LSTM or GNN.
     
     Args:
         spatial_features: Spatial feature matrix
@@ -127,6 +126,3 @@ def load_spatial_model(model_path: Path) -> dict:
     """Load trained spatial model from file."""
     with open(model_path, 'rb') as f:
         return pickle.load(f)
-
-
-
