@@ -64,11 +64,40 @@ class RoutingTopology:
                 self._drop_topology()
 
             # Create topology
+            # Note: pgRouting requires GEOMETRY type, but we use GEOGRAPHY
+            # We need to create a temporary table with geometry column for pgRouting
+            # This ensures the vertices table (road_segment_vertices_pgr) is created
             logger.info(f"Creating topology with tolerance {self.tolerance}...")
+            
+            # Drop existing temp table if exists
+            self.db.execute(text("DROP TABLE IF EXISTS road_segment_geometry CASCADE"))
+            self.db.commit()
+            
+            # Create a regular (not temp) table with geometry column for pgRouting
+            # This table will be used to create topology and vertices
+            self.db.execute(
+                text("""
+                    CREATE TABLE road_segment_geometry AS
+                    SELECT 
+                        id,
+                        geom::geometry as geom,
+                        road_type,
+                        speed_limit,
+                        one_way,
+                        cost,
+                        reverse_cost,
+                        source,
+                        target
+                    FROM road_segment
+                """)
+            )
+            self.db.commit()
+            
+            # Create topology using the table (this will create road_segment_geometry_vertices_pgr)
             result = self.db.execute(
                 text("""
                     SELECT pgr_createTopology(
-                        'road_segment',
+                        'road_segment_geometry',
                         :tolerance,
                         'geom',
                         'id',
@@ -79,10 +108,62 @@ class RoutingTopology:
                 """),
                 {"tolerance": self.tolerance},
             )
-            topology_result = result.scalar()
+            topology_result_str = result.scalar()
+            
+            # Copy vertices table to a permanent table for later use
+            self.db.execute(
+                text("""
+                    CREATE TABLE IF NOT EXISTS road_segment_vertices_pgr (
+                        id BIGINT PRIMARY KEY,
+                        cnt INTEGER,
+                        chk INTEGER,
+                        ein INTEGER,
+                        eout INTEGER,
+                        the_geom GEOMETRY(POINT, 4326)
+                    )
+                """)
+            )
+            self.db.execute(
+                text("""
+                    TRUNCATE TABLE road_segment_vertices_pgr
+                """)
+            )
+            # Check if vertices table was created
+            vertices_table_exists = self.db.execute(
+                text("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_name = 'road_segment_geometry_vertices_pgr'
+                    )
+                """)
+            ).scalar()
+            
+            if vertices_table_exists:
+                self.db.execute(
+                    text("""
+                        INSERT INTO road_segment_vertices_pgr
+                        SELECT * FROM road_segment_geometry_vertices_pgr
+                    """)
+                )
+                self.db.commit()
+            
+            # Update source and target in the original table from the geometry table
+            self.db.execute(
+                text("""
+                    UPDATE road_segment rs
+                    SET source = rsg.source, target = rsg.target
+                    FROM road_segment_geometry rsg
+                    WHERE rs.id = rsg.id
+                """)
+            )
+            self.db.commit()
+            
+            # Drop the temporary table (vertices table will remain)
+            self.db.execute(text("DROP TABLE IF EXISTS road_segment_geometry CASCADE"))
+            self.db.commit()
 
-            if topology_result:
-                logger.info(f"Topology created successfully: {topology_result}")
+            if topology_result_str:
+                logger.info(f"Topology created successfully: {topology_result_str}")
             else:
                 logger.warning("Topology creation returned no result")
 
@@ -93,7 +174,7 @@ class RoutingTopology:
                 "success": True,
                 "segment_count": segment_count,
                 "tolerance": self.tolerance,
-                "topology_result": str(topology_result),
+                "topology_result": str(topology_result_str) if 'topology_result_str' in locals() else "OK",
                 "validation": validation,
             }
 

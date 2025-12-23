@@ -13,7 +13,7 @@ from app.services.forecast.ensemble import ensemble_forecast
 from app.services.forecast.features import temporal_features
 import numpy as np
 
-router = APIRouter(prefix="/ml-forecast", tags=["ml-forecast"])
+router = APIRouter(prefix="/ml-forecast", tags=["ML Forecast"])
 
 
 @router.get("/timeseries")
@@ -168,3 +168,5 @@ def get_ensemble_forecast(
         },
         "models_used": ["kde", "sarimax", "spatial"]
     }
+
+

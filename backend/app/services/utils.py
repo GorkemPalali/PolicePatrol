@@ -4,7 +4,7 @@ from shapely.geometry import Point, LineString, Polygon
 from shapely import wkt
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List, List
 from functools import lru_cache
 
 
@@ -76,6 +76,63 @@ def get_point_coordinates(db: Session, geom) -> Tuple[float, float]:
                 pass
     
     return (0.0, 0.0)
+
+
+def get_station_neighborhood_boundaries(
+    db: Session,
+    station_id: str
+) -> Optional[Geography]:
+    """
+    Get combined boundary polygon for all neighborhoods that a police station is responsible for.
+    
+    Args:
+        db: Database session
+        station_id: UUID of the police station
+        
+    Returns:
+        Combined Geography polygon (MULTIPOLYGON or POLYGON) or None if not found
+    """
+    from app.models.police_station import PoliceStation
+    from app.models.administrative_boundary import AdministrativeBoundary
+    
+    # Get station and its neighborhoods
+    station = db.query(PoliceStation).filter(PoliceStation.id == station_id).first()
+    if not station or not station.neighborhoods:
+        return None
+    
+    # Get boundaries for all neighborhoods (admin_level 8 = mahalle)
+    boundaries = (
+        db.query(AdministrativeBoundary)
+        .filter(
+            AdministrativeBoundary.name.in_(station.neighborhoods),
+            AdministrativeBoundary.admin_level == 8
+        )
+        .all()
+    )
+    
+    if not boundaries:
+        return None
+    
+    # Combine all neighborhood boundaries into a single geometry
+    # Use ST_Union to merge multiple polygons
+    if len(boundaries) == 1:
+        return boundaries[0].geom
+    
+    # Multiple neighborhoods - combine them
+    boundary_ids = [str(b.id) for b in boundaries]
+    result = db.execute(
+        text("""
+            SELECT ST_Union(geom::geometry)::geography as combined_boundary
+            FROM administrative_boundary
+            WHERE id = ANY(:boundary_ids::uuid[])
+        """),
+        {"boundary_ids": boundary_ids}
+    ).first()
+    
+    if result and result.combined_boundary:
+        return result.combined_boundary
+    
+    return None
 
 
 def get_kucukcekmece_boundary(db: Session) -> Optional[Geography]:
@@ -158,6 +215,36 @@ def get_kucukcekmece_bbox_from_polygon(db: Session) -> Optional[Tuple[float, flo
     from app.core.config import get_settings
     settings = get_settings()
     return settings.kucukcekmece_fallback_bbox
+
+
+def get_polygon_coordinates(db: Session, geom) -> Optional[List[Tuple[float, float]]]:
+    """
+    Extract polygon exterior ring coordinates from PostGIS geography.
+    Returns list of (lon, lat) tuples - standard GeoJSON/PostGIS order.
+    """
+    if geom is None:
+        return None
+    
+    try:
+        # Get exterior ring as GeoJSON LineString
+        result = db.execute(
+            text("""
+                SELECT ST_AsGeoJSON(ST_ExteriorRing(ST_GeomFromWKB(:geom)))::json as geojson
+            """),
+            {"geom": geom.data}
+        ).scalar()
+        
+        if result and result.get("type") == "LineString":
+            coords = result.get("coordinates", [])
+            # GeoJSON is [lng, lat], return as (lon, lat) tuples - standard format
+            return [(coord[0], coord[1]) for coord in coords]
+        
+        return None
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Failed to extract polygon coordinates: {str(e)}")
+        return None
 
 
 def validate_within_boundary(

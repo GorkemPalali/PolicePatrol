@@ -80,3 +80,6 @@ COMMENT ON TRIGGER validate_police_station_boundary ON police_station IS
 COMMENT ON TRIGGER validate_risk_cell_boundary ON risk_cell IS 
     'Risk cell geometrisinin Küçükçekmece sınırları ile kesişmesini garanti eder';
 
+
+
+

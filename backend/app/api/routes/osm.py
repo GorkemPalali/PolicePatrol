@@ -23,7 +23,6 @@ class OSMImportRequest(BaseModel):
 
     clear_existing: bool = False
     create_topology: bool = True
-    bbox: Optional[List[float]] = None  # [min_lat, min_lng, max_lat, max_lng]
     highway_tags: Optional[List[str]] = None
 
 
@@ -59,21 +58,10 @@ def import_osm(
         Dictionary with import results
     """
     try:
-        # Convert bbox list to tuple if provided
-        bbox = None
-        if request.bbox:
-            if len(request.bbox) != 4:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Bbox must contain 4 values: [min_lat, min_lng, max_lat, max_lng]",
-                )
-            bbox = tuple(request.bbox)
-
         logger.info(f"Starting OSM import (clear_existing={request.clear_existing})")
 
         result = import_osm_data(
             db=db,
-            bbox=bbox,
             clear_existing=request.clear_existing,
             create_topology=request.create_topology,
             highway_tags=request.highway_tags,
@@ -137,6 +125,133 @@ def refresh_topology(
     except Exception as e:
         logger.error(f"Failed to refresh topology: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Topology refresh failed: {str(e)}")
+
+
+@router.post("/clean-boundary")
+def clean_road_segments_boundary(
+    db: Session = Depends(get_db),
+):
+    """
+    Manually clean road segments that are outside Küçükçekmece boundary.
+    This is only needed if data was imported without proper Overpass API filtering.
+    Overpass API already filters by relation/polygon/bbox, so this is typically not needed.
+    
+    Uses optimized filtering: motorway/trunk only need intersection, others need center OR 30% length.
+    
+    Returns:
+        Dictionary with cleaning statistics
+    """
+    try:
+        from app.services.osm.osm_importer import OSMImporter
+        
+        importer = OSMImporter(db, clear_existing=False)
+        cleanup_stats = importer.clean_segments_outside_boundary()
+        
+        return {
+            "success": True,
+            "message": "Road segments cleaned successfully",
+            **cleanup_stats
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to clean road segments: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clean road segments: {str(e)}"
+        )
+
+
+@router.post("/clear-all")
+def clear_all_osm_data(
+    db: Session = Depends(get_db),
+):
+    """
+    Clear all OSM road segment data from database.
+    This will delete all road segments and related topology data.
+    
+    Returns:
+        Dictionary with deletion statistics
+    """
+    try:
+        from app.models.road_segment import RoadSegment
+        from sqlalchemy import text
+        
+        # Get count before deletion
+        total_before = db.query(RoadSegment).count()
+        
+        # Delete all road segments
+        deleted_count = db.query(RoadSegment).delete()
+        
+        # Also delete topology vertices if they exist
+        try:
+            db.execute(text("DROP TABLE IF EXISTS road_segment_vertices_pgr CASCADE"))
+        except Exception as e:
+            logger.warning(f"Failed to drop topology vertices table: {str(e)}")
+        
+        db.commit()
+        
+        logger.info(f"Cleared {deleted_count} road segments from database")
+        
+        return {
+            "success": True,
+            "message": "All OSM data cleared successfully",
+            "deleted_segments": deleted_count,
+            "total_before": total_before
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to clear OSM data: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clear OSM data: {str(e)}"
+        )
+
+
+@router.post("/import-motorway")
+def import_motorway_only(
+    db: Session = Depends(get_db),
+    clear_existing: bool = Query(True, description="Clear existing data before import"),
+    create_topology: bool = Query(True, description="Create pgRouting topology after import"),
+):
+    """
+    Import only motorway road segments from OSM within Küçükçekmece boundary.
+    Uses Overpass API to fetch motorway data filtered by relation ID.
+    
+    Args:
+        clear_existing: If True, clear existing road segments before import
+        create_topology: If True, create pgRouting topology after import
+    
+    Returns:
+        Dictionary with import results
+    """
+    try:
+        # Import only motorway highways
+        result = import_osm_data(
+            db=db,
+            clear_existing=clear_existing,
+            create_topology=create_topology,
+            highway_tags=["motorway"]  # Only motorway
+        )
+        
+        if result.get("success"):
+            return {
+                "success": True,
+                "message": "Motorway data imported successfully",
+                **result
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Import failed: {result.get('errors', ['Unknown error'])}"
+            )
+        
+    except Exception as e:
+        logger.error(f"Failed to import motorway data: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to import motorway data: {str(e)}"
+        )
 
 
 @router.get("/topology-status")
@@ -276,5 +391,103 @@ def get_boundary_status(db: Session = Depends(get_db)):
         logger.error(f"Failed to get boundary status: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Failed to get boundary status: {str(e)}"
+        )
+
+
+@router.get("/road-network")
+def get_road_network(
+    min_lat: Optional[float] = Query(None, description="Bounding box min latitude"),
+    min_lng: Optional[float] = Query(None, description="Bounding box min longitude"),
+    max_lat: Optional[float] = Query(None, description="Bounding box max latitude"),
+    max_lng: Optional[float] = Query(None, description="Bounding box max longitude"),
+    limit: int = Query(10000, ge=1, le=50000, description="Maximum number of road segments"),
+    db: Session = Depends(get_db),
+):
+    """
+    Get OSM driveable road network as GeoJSON.
+    Returns road segments within Küçükçekmece boundaries or specified bbox.
+    Only includes driveable roads (motorway, trunk, primary, secondary, tertiary, residential, service, unclassified).
+    """
+    try:
+        from sqlalchemy import text
+        from app.models.road_segment import RoadSegment
+        from app.services.utils import get_kucukcekmece_boundary
+        
+        # Only driveable road types
+        driveable_road_types = [
+            "motorway", "trunk", "primary", "secondary", "tertiary",
+            "residential", "service", "unclassified"
+        ]
+        
+        query = db.query(RoadSegment).filter(
+            RoadSegment.road_type.in_(driveable_road_types)
+        )
+        
+        # Filter by boundary - temporarily disabled due to boundary parser issue
+        # Boundary polygon is incomplete (only 18 points, too small area)
+        # TODO: Fix boundary parser to merge all outer ways correctly
+        # For now, return all driveable roads (they were already filtered by Overpass API using relation_id)
+        # boundary_geom = get_kucukcekmece_boundary(db)
+        # if boundary_geom:
+        #     query = query.filter(...)
+        
+        # Filter by bbox if provided
+        if all([min_lat, min_lng, max_lat, max_lng]):
+            query = query.filter(
+                text("""
+                    ST_Intersects(
+                        geom,
+                        ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)::geography
+                    )
+                """).params(
+                    min_lat=min_lat,
+                    min_lng=min_lng,
+                    max_lat=max_lat,
+                    max_lng=max_lng
+                )
+            )
+        
+        segments = query.limit(limit).all()
+        
+        # Convert to GeoJSON FeatureCollection
+        features = []
+        for segment in segments:
+            try:
+                geom_json = db.execute(
+                    text("""
+                        SELECT ST_AsGeoJSON(geom)::json as geom_json
+                        FROM road_segment
+                        WHERE id = :segment_id
+                    """),
+                    {"segment_id": segment.id}
+                ).scalar()
+                
+                if geom_json:
+                    features.append({
+                        "type": "Feature",
+                        "properties": {
+                            "id": segment.id,
+                            "road_type": segment.road_type,
+                            "speed_limit": segment.speed_limit,
+                            "one_way": segment.one_way,
+                            "risk_score": segment.risk_score if segment.risk_score else 0.0,
+                        },
+                        "geometry": geom_json
+                    })
+            except Exception as e:
+                logger.debug(f"Failed to convert segment {segment.id} to GeoJSON: {str(e)}")
+                continue
+        
+        return {
+            "type": "FeatureCollection",
+            "features": features,
+            "total": len(features)
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get road network: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get road network: {str(e)}"
         )
 

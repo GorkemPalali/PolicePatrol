@@ -22,3 +22,6 @@ class RiskMapResponse(BaseModel):
     grid_size_m: float
     total_cells: int
 
+
+
+

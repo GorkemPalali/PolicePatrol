@@ -44,6 +44,19 @@ class BoundaryImporter:
             Dictionary with import results
         """
         try:
+            # Parse boundary and extract relation ID
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(xml_data)
+            
+            # Extract relation ID from XML
+            osm_id = None
+            relations = root.findall("relation")
+            for relation in relations:
+                tags = {tag.get("k"): tag.get("v") for tag in relation.findall("tag")}
+                if tags.get("boundary") == "administrative":
+                    osm_id = int(relation.get("id"))
+                    break
+            
             # Parse boundary
             polygon_rings = self.parser.parse_boundary_xml(xml_data)
             if not polygon_rings or len(polygon_rings) == 0:
@@ -88,27 +101,30 @@ class BoundaryImporter:
                     text("""
                         UPDATE administrative_boundary
                         SET geom = ST_GeogFromText(:wkt),
+                            osm_id = :osm_id,
                             updated_at = NOW()
                         WHERE id = :id
                     """),
                     {
                         "wkt": f"SRID=4326;{wkt}",
+                        "osm_id": osm_id,
                         "id": str(existing.id),
                     },
                 )
                 boundary_id = str(existing.id)
             else:
                 # Create new
-                logger.info(f"Creating new boundary {name} (admin_level={admin_level})")
+                logger.info(f"Creating new boundary {name} (admin_level={admin_level}, osm_id={osm_id})")
                 result = self.db.execute(
                     text("""
-                        INSERT INTO administrative_boundary (id, name, admin_level, geom, created_at, updated_at)
-                        VALUES (gen_random_uuid(), :name, :admin_level, ST_GeogFromText(:wkt), NOW(), NOW())
+                        INSERT INTO administrative_boundary (id, name, admin_level, osm_id, geom, created_at, updated_at)
+                        VALUES (gen_random_uuid(), :name, :admin_level, :osm_id, ST_GeogFromText(:wkt), NOW(), NOW())
                         RETURNING id
                     """),
                     {
                         "name": name,
                         "admin_level": admin_level,
+                        "osm_id": osm_id,
                         "wkt": f"SRID=4326;{wkt}",
                     },
                 )
@@ -163,4 +179,7 @@ class BoundaryImporter:
             True if exists, False otherwise
         """
         return self.get_boundary(name, admin_level) is not None
+
+
+
 

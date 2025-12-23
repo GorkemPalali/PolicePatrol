@@ -130,3 +130,6 @@ def load_sarimax_model(model_path: Path) -> SARIMAX:
     """Load trained SARIMAX model from file."""
     with open(model_path, 'rb') as f:
         return pickle.load(f)
+
+
+

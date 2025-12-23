@@ -97,29 +97,14 @@ class OSMImporter:
         for segment_data in road_segments:
             try:
                 # Convert coordinates to LineString WKT
-                # OSM uses (lat, lng), PostGIS expects (lng, lat) for geography
+                # RoadSegmentData.geom_coordinates already uses (lon, lat) order - standard GeoJSON/PostGIS format
                 coords_wkt = ", ".join(
-                    [f"{lng} {lat}" for lat, lng in segment_data.geom_coordinates]
+                    [f"{lon} {lat}" for lon, lat in segment_data.geom_coordinates]
                 )
                 linestring_wkt = f"LINESTRING({coords_wkt})"
 
-                # Filter by Küçükçekmece polygon boundary
-                # Only import segments that intersect with the boundary
-                # Use ST_Intersects for LineString (not ST_Within, as segments can cross boundary)
-                segment_intersects = self.db.execute(
-                    text("""
-                        SELECT ST_Intersects(
-                            ST_GeogFromText(:wkt),
-                            (SELECT geom FROM administrative_boundary 
-                             WHERE name = 'Küçükçekmece' AND admin_level = 8 LIMIT 1)
-                        )
-                    """),
-                    {"wkt": f"SRID=4326;{linestring_wkt}"}
-                ).scalar()
-                
-                if not segment_intersects:
-                    stats["skipped"] += 1
-                    continue
+                # No boundary filtering here - Overpass API already filters by relation/polygon/bbox
+                # The data fetched from Overpass API is already filtered, so we trust it and import directly
 
                 # Check if segment already exists
                 existing = self.db.query(RoadSegment).filter(RoadSegment.id == segment_data.osm_id).first()
@@ -214,4 +199,89 @@ class OSMImporter:
             return count > 0
         except Exception:
             return False
+
+    def clean_segments_outside_boundary(self) -> dict:
+        """
+        Remove road segments that are outside Küçükçekmece boundary.
+        This ensures only segments significantly within the boundary remain.
+        
+        Returns:
+            Dictionary with cleaning statistics
+        """
+        stats = {
+            "total_before": 0,
+            "deleted": 0,
+            "kept": 0,
+            "errors": 0,
+        }
+        
+        try:
+            # Get total count before cleaning
+            stats["total_before"] = self.db.query(RoadSegment).count()
+            
+            # Check if boundary exists
+            boundary_exists = self.db.execute(
+                text("""
+                    SELECT COUNT(*) > 0
+                    FROM administrative_boundary 
+                    WHERE name = 'Küçükçekmece' AND admin_level = 6
+                """)
+            ).scalar()
+            
+            if not boundary_exists:
+                logger.warning("Küçükçekmece boundary not found, skipping cleanup")
+                stats["kept"] = stats["total_before"]
+                return stats
+            
+            # Optimized cleanup: motorway/trunk only need intersection, others need center OR 30% length
+            deleted_count = self.db.execute(
+                text("""
+                    WITH boundary_geom AS (
+                        SELECT geom FROM administrative_boundary 
+                        WHERE name = 'Küçükçekmece' AND admin_level = 6 LIMIT 1
+                    )
+                    DELETE FROM road_segment rs
+                    WHERE NOT (
+                        -- Motorway/trunk: only check intersection (they often cross boundaries)
+                        (rs.road_type IN ('motorway', 'trunk') AND ST_Intersects(
+                            rs.geom::geometry,
+                            (SELECT geom::geometry FROM boundary_geom)
+                        ))
+                        OR
+                        -- Other roads: center within OR at least 30% length within
+                        (rs.road_type NOT IN ('motorway', 'trunk') AND (
+                            ST_Within(
+                                ST_Centroid(rs.geom::geometry),
+                                (SELECT geom::geometry FROM boundary_geom)
+                            )
+                            OR
+                            (
+                                ST_Length(
+                                    ST_Intersection(
+                                        rs.geom::geometry,
+                                        (SELECT geom::geometry FROM boundary_geom)
+                                    )
+                                ) / NULLIF(ST_Length(rs.geom::geometry), 0)
+                            ) >= 0.3
+                        ))
+                    )
+                """)
+            ).rowcount
+            
+            self.db.commit()
+            stats["deleted"] = deleted_count
+            stats["kept"] = stats["total_before"] - deleted_count
+            
+            logger.info(
+                f"Cleaned road segments: {stats['deleted']} deleted, "
+                f"{stats['kept']} kept (out of {stats['total_before']} total)"
+            )
+            
+            return stats
+            
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Failed to clean segments outside boundary: {str(e)}")
+            stats["errors"] = 1
+            return stats
 

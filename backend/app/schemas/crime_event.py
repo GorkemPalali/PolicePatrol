@@ -34,3 +34,6 @@ class CrimeEventUpdate(BaseModel):
     lng: Optional[float] = Field(None, ge=-180, le=180)
     street_name: Optional[str] = Field(None, max_length=255)
     confidence_score: Optional[float] = Field(None, ge=0.0, le=1.0)
+
+
+

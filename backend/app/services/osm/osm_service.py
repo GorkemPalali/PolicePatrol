@@ -15,17 +15,16 @@ logger = logging.getLogger(__name__)
 
 def import_osm_data(
     db: Session,
-    bbox: Optional[Tuple[float, float, float, float]] = None,
     clear_existing: bool = False,
     create_topology: bool = True,
     highway_tags: Optional[list] = None,
 ) -> Dict[str, any]:
     """
     Main function to import OSM data and create routing topology.
+    Uses only OSM relation ID for filtering - Overpass API handles the filtering.
 
     Args:
         db: Database session
-        bbox: Bounding box (min_lat, min_lng, max_lat, max_lng). If None, uses config default
         clear_existing: If True, clear existing road segments before import
         create_topology: If True, create pgRouting topology after import
         highway_tags: List of highway tag values to filter. If None, uses defaults
@@ -35,16 +34,45 @@ def import_osm_data(
     """
     settings = get_settings()
 
-    # Use provided bbox or get from polygon
-    if bbox is None:
-        from app.services.utils import get_kucukcekmece_bbox_from_polygon
-        bbox = get_kucukcekmece_bbox_from_polygon(db) or settings.kucukcekmece_fallback_bbox
+    # Get OSM relation ID from Küçükçekmece boundary - only method supported
+    from app.services.utils import get_kucukcekmece_boundary
+    from app.models.administrative_boundary import AdministrativeBoundary
+    
+    boundary_geom = get_kucukcekmece_boundary(db)
+    relation_id = None
+    
+    # Get OSM relation ID from database
+    if boundary_geom:
+        boundary_record = db.query(AdministrativeBoundary).filter(
+            AdministrativeBoundary.name == settings.kucukcekmece_boundary_name,
+            AdministrativeBoundary.admin_level == settings.kucukcekmece_boundary_admin_level
+        ).first()
+        
+        if boundary_record and boundary_record.osm_id:
+            relation_id = boundary_record.osm_id
+            logger.info(f"Using OSM relation ID: {relation_id} for Küçükçekmece boundary")
+        else:
+            logger.warning("Küçükçekmece boundary found but no OSM relation ID. Import will fail.")
+            return {
+                "success": False,
+                "relation_id": None,
+                "steps": {},
+                "errors": ["Küçükçekmece boundary must have OSM relation ID. Please import boundary first."],
+            }
+    else:
+        logger.warning("Küçükçekmece boundary not found. Please import boundary first.")
+        return {
+            "success": False,
+            "relation_id": None,
+            "steps": {},
+            "errors": ["Küçükçekmece boundary not found. Please import boundary first using POST /api/v1/osm/import-boundary"],
+        }
 
-    logger.info(f"Starting OSM import for bbox: {bbox}")
+    logger.info(f"Starting OSM import for Küçükçekmece (relation_id={relation_id})")
 
     result = {
         "success": False,
-        "bbox": bbox,
+        "relation_id": relation_id,
         "steps": {},
         "errors": [],
     }
@@ -53,6 +81,7 @@ def import_osm_data(
         # Step 1: Initialize Overpass client
         logger.info("Step 1: Initializing Overpass API client...")
         overpass_url = getattr(settings, "overpass_api_url", "https://overpass-api.de/api/interpreter")
+        alternative_urls = getattr(settings, "overpass_api_alternatives", [])
         client = OverpassClient(api_url=overpass_url)
 
         # Check API status
@@ -66,10 +95,18 @@ def import_osm_data(
         result["steps"]["api_status"] = api_status
         logger.info(f"Overpass API is available (response time: {api_status.get('response_time_ms', 0):.2f}ms)")
 
-        # Step 2: Fetch OSM data
-        logger.info("Step 2: Fetching OSM data from Overpass API...")
+        # Step 2: Fetch OSM data - Overpass API filters by relation_id
+        logger.info("Step 2: Fetching OSM data from Overpass API using relation_id...")
+        logger.info(f"Using relation_id: {relation_id}")
         try:
-            xml_data = client.fetch_osm_data(bbox, highway_tags)
+            # Overpass API filters by relation_id - no manual filtering needed
+            xml_data = client.fetch_osm_data(
+                bbox=None,
+                highway_tags=highway_tags,
+                alternative_urls=alternative_urls,
+                relation_id=relation_id,
+                polygon_coords=None
+            )
             result["steps"]["osm_data_fetched"] = {
                 "size_bytes": len(xml_data),
                 "success": True,
@@ -84,7 +121,7 @@ def import_osm_data(
         # Step 3: Parse OSM data
         logger.info("Step 3: Parsing OSM XML data...")
         try:
-            parser = OSMParser(bbox=bbox)
+            parser = OSMParser()
             road_segments = parser.parse_xml(xml_data)
             result["steps"]["osm_parsed"] = {
                 "segments_found": len(road_segments),
@@ -113,6 +150,9 @@ def import_osm_data(
                 f"Import completed: {import_stats['imported']} imported, "
                 f"{import_stats['skipped']} skipped, {import_stats['errors']} errors"
             )
+            
+            # No post-import cleanup needed - Overpass API already filtered the data
+            # cleanup_segments_outside_boundary() is available as a manual endpoint if needed
         except Exception as e:
             error_msg = f"Failed to import road segments: {str(e)}"
             logger.error(error_msg)

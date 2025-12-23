@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     # Boundary is now stored in database as polygon
     # These are fallback values for initial setup or when boundary is not loaded
     kucukcekmece_boundary_name: str = "Küçükçekmece"
-    kucukcekmece_boundary_admin_level: int = 8
+    kucukcekmece_boundary_admin_level: int = 6  # İlçe seviyesi (district level) - OSM'de admin_level 6
     # Fallback bbox (used only if polygon is not available)
     kucukcekmece_fallback_bbox: Tuple[float, float, float, float] = (
         40.98,   # min_lat
@@ -38,10 +38,16 @@ class Settings(BaseSettings):
     strict_boundary_validation: bool = True
 
     # OSM Import settings
+    # Try multiple Overpass API endpoints for reliability
     overpass_api_url: str = "https://overpass-api.de/api/interpreter"
+    overpass_api_alternatives: List[str] = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.openstreetmap.ru/api/interpreter",
+    ]
     osm_import_on_startup: bool = True
     # OSM relation ID for Küçükçekmece administrative boundary
-    osm_boundary_relation_id: int = 111111  # Update with actual relation ID from OSM
+    osm_boundary_relation_id: int = 7786498  # Küçükçekmece İlçesi relation ID from OSM
     osm_highway_tags: List[str] = [
         "motorway",
         "trunk",

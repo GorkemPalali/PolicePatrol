@@ -17,7 +17,7 @@ from app.services.utils import get_kucukcekmece_bbox_from_polygon
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/realtime", tags=["realtime"])
+router = APIRouter(prefix="/realtime", tags=["Realtime"])
 settings = get_settings()
 
 

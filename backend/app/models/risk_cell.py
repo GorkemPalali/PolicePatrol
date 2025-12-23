@@ -16,3 +16,6 @@ class RiskCell(Base):
     risk_score = Column(Float, nullable=False)
     confidence = Column(Float, nullable=False)
     created_at = Column(TIMESTAMP(timezone=False), server_default=func.now(), nullable=False)
+
+
+

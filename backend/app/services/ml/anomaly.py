@@ -29,3 +29,6 @@ def detect_anomalies(
     
     # Convert to boolean (anomaly = -1)
     return [pred == -1 for pred in predictions]
+
+
+

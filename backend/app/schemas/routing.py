@@ -22,6 +22,8 @@ class RouteOptimizeRequest(BaseModel):
     risk_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     max_minutes: int = Field(default=90, ge=1, le=180)
     end_station_id: Optional[UUID] = None  # If None, returns to start station
+    start_time: Optional[str] = None  # ISO format datetime string for forecast time window start
+    end_time: Optional[str] = None  # ISO format datetime string for forecast time window end
 
 
 class StationRoute(BaseModel):

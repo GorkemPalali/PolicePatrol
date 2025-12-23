@@ -127,3 +127,6 @@ def load_spatial_model(model_path: Path) -> dict:
     """Load trained spatial model from file."""
     with open(model_path, 'rb') as f:
         return pickle.load(f)
+
+
+
